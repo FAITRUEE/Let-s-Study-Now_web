@@ -1475,6 +1475,15 @@ const GroupStudyRoomPage: React.FC = () => {
           </h1>
           <Badge variant="secondary">{roomInfo.studyField}</Badge>
 
+          {roomInfo.remainingMinutes && roomInfo.remainingMinutes > 0 && (
+            <div className="flex items-center text-sm text-gray-600">
+              <Clock className="w-4 h-4 mr-1" />
+              <span>남은 시간: {roomInfo.remainingMinutes}분</span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center space-x-4">
           {/* 참여자 수 팝오버 */}
           <Popover>
             <PopoverTrigger asChild>
@@ -1569,15 +1578,6 @@ const GroupStudyRoomPage: React.FC = () => {
             </PopoverContent>
           </Popover>
 
-          {roomInfo.remainingMinutes && roomInfo.remainingMinutes > 0 && (
-            <div className="flex items-center text-sm text-gray-600">
-              <Clock className="w-4 h-4 mr-1" />
-              <span>남은 시간: {roomInfo.remainingMinutes}분</span>
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center space-x-4">
           <Button
             variant="outline"
             size="sm"
