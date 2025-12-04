@@ -26,10 +26,12 @@ import {
   sessionAPI,
   GroupStudyRoom,
   TimerStatusResponse,
-  StudyRoomParticipant,
+  TimerStatus,
+  TimerMode,
   LevelInfoDto,
+  SessionStartRequestDto,
+  SessionEndResultDto,
 } from "@/lib/api";
-import { webSocketService, WebSocketMessage } from "@/lib/websocket";
 import {
   Clock,
   Send,
@@ -44,8 +46,11 @@ import {
   CheckCircle,
   X,
   AlertCircle,
+  Paperclip,
   Image as ImageIcon,
   Users,
+  Edit2,
+  Check,
   Copy,
 } from "lucide-react";
 
@@ -69,6 +74,16 @@ interface ChatMessage {
   fileName?: string;
 }
 
+// 참여자 정보 인터페이스 (UI용 더미 데이터)
+interface Participant {
+  id: number;
+  username: string;
+  profileImageUrl?: string;
+  timerStatus: "STUDYING" | "RESTING";
+  statusMessage?: string;
+  isCreator?: boolean;
+}
+
 const GroupStudyRoomPage: React.FC = () => {
   const { user } = useAuth();
   const { roomId } = useParams<{ roomId: string }>();
@@ -86,211 +101,107 @@ const GroupStudyRoomPage: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageInput, setMessageInput] = useState("");
 
-  // Participants
-  const [participants, setParticipants] = useState<StudyRoomParticipant[]>([]);
-
   // My Status
   const [myStatus, setMyStatus] = useState<"studying" | "resting">("studying");
 
-  // Session
+  // Session - 백엔드 연동
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [currentSeconds, setCurrentSeconds] = useState(0);
   const intervalRef = useRef<any>(null);
 
-  // Timer Status
-  const [timerStatus, setTimerStatus] = useState<TimerStatusResponse | null>(null);
+  // ✅ 타이머 상태 (백엔드 연동) - 기존 timerAPI용 (필요시 유지)
+  const [timerStatus, setTimerStatus] = useState<TimerStatusResponse | null>(
+    null
+  );
 
   // Level Info
   const [levelInfo, setLevelInfo] = useState<LevelInfoDto | null>(null);
 
   // Pomodoro Timer
   const [pomodoroMode, setPomodoroMode] = useState<"work" | "shortBreak" | "longBreak">("work");
-  const [pomodoroTime, setPomodoroTime] = useState(25 * 60);
+  const [pomodoroTime, setPomodoroTime] = useState(25 * 60); // 25분 (초 단위)
   const [pomodoroIsRunning, setPomodoroIsRunning] = useState(false);
-  const [pomodoroCycle, setPomodoroCycle] = useState(1);
+  const [pomodoroCycle, setPomodoroCycle] = useState(1); // 1-4 사이클
   const pomodoroIntervalRef = useRef<any>(null);
+
+  // Participants (UI용 더미 데이터)
+  const [participants, setParticipants] = useState<Participant[]>([
+    {
+      id: 1,
+      username: "다영",
+      timerStatus: "STUDYING",
+      statusMessage: "열심히 공부 중입니다! 💪",
+      isCreator: true,
+    },
+    {
+      id: 2,
+      username: user?.username || "사용자",
+      timerStatus: "STUDYING",
+      statusMessage: "오늘도 화이팅!",
+    },
+  ]);
+
+  // 상태 메시지 편집 관련
+  const [isEditingStatusMessage, setIsEditingStatusMessage] = useState(false);
+  const [statusMessageInput, setStatusMessageInput] = useState("");
 
   // Question mode
   const [isQuestionMode, setIsQuestionMode] = useState(false);
   const [questionImage, setQuestionImage] = useState<string | null>(null);
   const [questionFileName, setQuestionFileName] = useState<string | null>(null);
 
-  // Answer input
+  // Answer input for specific question
   const [answerInputs, setAnswerInputs] = useState<Record<string, string>>({});
 
-  // Dialogs
+  // Question list popover
   const [questionListOpen, setQuestionListOpen] = useState(false);
+
+  // Dialogs
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [exitDialogOpen, setExitDialogOpen] = useState(false);
 
-  // ==========================================
-  // 함수들 (컴포넌트 내부)
-  // ==========================================
-
-  // WebSocket 메시지 처리
-  const handleWebSocketMessage = (wsMessage: WebSocketMessage) => {
-    console.log("📩 Received:", wsMessage);
-    const msgId = (wsMessage.id || wsMessage.messageId || Date.now()).toString();
-
-    if (wsMessage.type === "QUESTION") {
-      const newMsg: ChatMessage = {
-        id: msgId,
-        type: "question",
-        sender: wsMessage.sender,
-        content: wsMessage.message,
-        imageUrl: wsMessage.imageUrl,
-        timestamp: new Date(wsMessage.sentAt),
-        answers: [],
-        status: "open",
-      };
-      setMessages((prev) => [...prev, newMsg]);
+  // 상태 메시지 저장
+  const handleSaveStatusMessage = () => {
+    if (statusMessageInput.length > 50) {
+      toast({
+        title: "오류",
+        description: "상태 메시지는 50자 이내로 입력해주세요.",
+        variant: "destructive",
+      });
       return;
     }
 
-    if (wsMessage.type === "ANSWER" && wsMessage.refId) {
-      setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id === wsMessage.refId?.toString() && msg.type === "question") {
-            const newAnswer: HelpAnswer = {
-              id: msgId,
-              answerer: wsMessage.sender,
-              content: wsMessage.message,
-              timestamp: new Date(wsMessage.sentAt),
-            };
-            return {
-              ...msg,
-              answers: [...(msg.answers || []), newAnswer],
-              status: "helping" as const,
-            };
-          }
-          return msg;
-        })
-      );
-      return;
-    }
+    // 본인 참여자의 상태 메시지 업데이트
+    setParticipants((prev) =>
+      prev.map((p) =>
+        p.username === user?.username
+          ? { ...p, statusMessage: statusMessageInput.trim() || undefined }
+          : p
+      )
+    );
 
-    if (wsMessage.type === "SOLVE") {
-      console.log("✅ SOLVE message received:", wsMessage);
-
-      if (wsMessage.refId) {
-        setMessages((prev) =>
-          prev.map((msg) => {
-            if (msg.id === wsMessage.refId?.toString() && msg.type === "question") {
-              console.log("✅ Marking question as SOLVED:", msg.id);
-              return {
-                ...msg,
-                status: "resolved" as const,
-              };
-            }
-            return msg;
-          })
-        );
-      }
-
-      addSystemMessage(wsMessage.message);
-      return;
-    }
-
-    if (wsMessage.type === "SYSTEM") {
-      addSystemMessage(wsMessage.message);
-      return;
-    }
-
-    if (wsMessage.type === "TALK") {
-      const newMsg: ChatMessage = {
-        id: msgId,
-        type: "text",
-        sender: wsMessage.sender,
-        content: wsMessage.message,
-        imageUrl: wsMessage.imageUrl,
-        timestamp: new Date(wsMessage.sentAt),
-      };
-      setMessages((prev) => [...prev, newMsg]);
-    }
+    setIsEditingStatusMessage(false);
+    toast({
+      title: "상태 메시지 업데이트",
+      description: "상태 메시지가 변경되었습니다.",
+    });
   };
 
-  // 채팅 내역 불러오기
-  const loadChatHistory = async (roomIdNum: number) => {
-    try {
-      const { chatAPI } = await import("@/lib/api");
-      const response = await chatAPI.getChatHistory(roomIdNum, "GROUP", 0);
-
-      console.log("📦 Chat history response:", response);
-
-      if (!Array.isArray(response)) {
-        console.warn("⚠️ Chat history is not an array:", response);
-        setMessages([]);
-        return;
-      }
-
-      if (response.length === 0) {
-        console.log("✅ No chat history found");
-        setMessages([]);
-        return;
-      }
-
-      // API 응답을 ChatMessage 형식으로 변환
-      const loadedMessages: ChatMessage[] = response.map((apiMsg: any) => {
-        const baseMessage: ChatMessage = {
-          id: apiMsg.id?.toString() || apiMsg.messageId?.toString() || Date.now().toString(),
-          type: apiMsg.type === "QUESTION" ? "question" : apiMsg.type === "SYSTEM" ? "system" : "text",
-          sender: apiMsg.sender,
-          content: apiMsg.message,
-          imageUrl: apiMsg.imageUrl,
-          timestamp: new Date(apiMsg.sentAt),
-        };
-
-        if (apiMsg.type === "QUESTION") {
-          baseMessage.status = apiMsg.isSolved ? "resolved" : "open";
-          baseMessage.answers = [];
-        }
-
-        return baseMessage;
-      });
-
-      // 답변 메시지들을 해당 질문에 연결
-      loadedMessages.forEach((msg) => {
-        const apiMsg = response.find((m: any) => 
-          (m.id?.toString() || m.messageId?.toString()) === msg.id
-        );
-        
-        if (apiMsg && apiMsg.type === "ANSWER" && apiMsg.refId) {
-          const questionMsg = loadedMessages.find(
-            (m) => m.id === apiMsg.refId?.toString() && m.type === "question"
-          );
-          if (questionMsg) {
-            const answer: HelpAnswer = {
-              id: msg.id,
-              answerer: msg.sender || "익명",
-              content: msg.content,
-              timestamp: msg.timestamp,
-            };
-            if (!questionMsg.answers) questionMsg.answers = [];
-            questionMsg.answers.push(answer);
-            if (questionMsg.answers.length > 0 && questionMsg.status !== "resolved") {
-              questionMsg.status = "helping";
-            }
-          }
-        }
-      });
-
-      // ANSWER 타입 제외
-      const filteredMessages = loadedMessages.filter(
-        (msg) => msg.type !== "text" || !response.find((m: any) => 
-          (m.id?.toString() || m.messageId?.toString()) === msg.id && m.type === "ANSWER"
-        )
-      );
-
-      setMessages(filteredMessages);
-      console.log("✅ Chat history loaded:", filteredMessages.length, "messages");
-    } catch (error) {
-      console.error("❌ Failed to load chat history:", error);
-      setMessages([]);
-    }
+  // 상태 메시지 편집 시작
+  const handleStartEditStatusMessage = () => {
+    const currentUser = participants.find((p) => p.username === user?.username);
+    setStatusMessageInput(currentUser?.statusMessage || "");
+    setIsEditingStatusMessage(true);
   };
 
-  // 시간 포맷
+  // 상태 메시지 편집 취소
+  const handleCancelEditStatusMessage = () => {
+    setIsEditingStatusMessage(false);
+    setStatusMessageInput("");
+  };
+
+  // 시간 포맷 함수
   const formatRelativeTime = (date: Date) => {
     const now = new Date();
     const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
@@ -311,306 +222,376 @@ const GroupStudyRoomPage: React.FC = () => {
     });
   };
 
-  // 메시지 전송
-  const handleSendMessage = () => {
-    if (!messageInput.trim() || !roomId) return;
+  // 채팅 스크롤
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
-    const roomIdNum = Number(roomId);
-
-    if (isQuestionMode) {
-      webSocketService.sendMessage({
-        type: "QUESTION",
-        roomType: "GROUP",
-        roomId: roomIdNum,
-        message: messageInput,
-      });
-
-      setMessageInput("");
-      setIsQuestionMode(false);
-      setQuestionImage(null);
-      setQuestionFileName(null);
-
-      toast({
-        title: "질문 등록",
-        description: "질문이 등록되었습니다!",
-      });
-    } else {
-      webSocketService.sendMessage({
-        type: "TALK",
-        roomType: "GROUP",
-        roomId: roomIdNum,
-        message: messageInput,
-      });
-      setMessageInput("");
-    }
-  };
-
-  // 시스템 메시지 추가
-  const addSystemMessage = (content: string) => {
-    const newMessage: ChatMessage = {
-      id: Date.now().toString(),
-      type: "system",
-      content,
-      timestamp: new Date(),
-    };
-    setMessages((prev) => [...prev, newMessage]);
-  };
-
-  // 이미지 업로드
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    // ✅ 파일 타입 검사
-    if (!file.type.startsWith("image/")) {
-      toast({
-        title: "오류",
-        description: "이미지 파일만 업로드할 수 있습니다.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // ✅ 파일 크기 검사
-    if (file.size > 10 * 1024 * 1024) {
-      toast({
-        title: "오류",
-        description: "이미지 크기는 10MB를 초과할 수 없습니다.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (isQuestionMode) {
-      const imageUrl = URL.createObjectURL(file);
-      setQuestionImage(imageUrl);
-      setQuestionFileName(file.name);
-    } else {
+  // 레벨 정보 조회
+  useEffect(() => {
+    const fetchLevelInfo = async () => {
       try {
-        console.log("🖼️ 이미지 업로드 시작:", {
-          name: file.name,
-          type: file.type,
-          size: file.size,
-          sizeKB: (file.size / 1024).toFixed(2) + "KB",
-        });
+        const info = await sessionAPI.getLevelInfo();
+        setLevelInfo(info);
+      } catch (error) {
+        console.error("Failed to fetch level info:", error);
+      }
+    };
 
-        // ✅ 토큰 확인
-        const token = localStorage.getItem("authToken");
-        console.log("🔑 JWT 토큰 존재:", !!token);
-        if (!token) {
-          toast({
-            title: "인증 필요",
-            description: "로그인이 필요합니다.",
-            variant: "destructive",
-          });
-          return;
-        }
-        
-        const { chatAPI } = await import("@/lib/api");
-        console.log("🚀 chatAPI.uploadImage 호출...");
-        
-        const imageUrl = await chatAPI.uploadImage(file);
-        
-        console.log("✅ 업로드 성공! URL:", imageUrl);
+    if (user) {
+      fetchLevelInfo();
+    }
+  }, [user]);
 
-        if (roomId) {
-          const roomIdNum = parseInt(roomId, 10);
-          webSocketService.sendMessage({
-            type: "TALK",
-            roomType: "GROUP",
-            roomId: roomIdNum,
-            message: imageUrl,
-          });
-          console.log("📡 WebSocket 메시지 전송 완료");
-        }
+  // 타이머 실시간 UI 업데이트 - myStatus에 따라 작동
+  useEffect(() => {
+    // 기존 interval 정리
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
 
-        toast({
-          title: "이미지 전송 완료",
-          description: "이미지가 전송되었습니다.",
-        });
-      } catch (error: any) {
-        console.error("❌ 이미지 업로드 실패!");
-        console.error("에러 객체:", error);
-        console.error("에러 메시지:", error?.message);
-        console.error("에러 상태:", error?.status);
-        console.error("에러 상세:", error?.details);
-        
-        let errorMessage = "이미지 업로드에 실패했습니다.";
-        
-        if (error?.status === 401) {
-          errorMessage = "로그인이 필요합니다. 다시 로그인해주세요.";
-        } else if (error?.status === 413) {
-          errorMessage = "파일 크기가 너무 큽니다.";
-        } else if (error?.status === 500) {
-          errorMessage = "서버 오류가 발생했습니다. 백엔드 서버 로그를 확인해주세요.";
-          // 서버 에러 원문 출력
-          if (error?.details?.raw) {
-            console.error("🔍 서버 에러 원문:", error.details.raw);
+    // ✅ "공부중" 상태일 때만 타이머 시작
+    if (myStatus === "studying") {
+      // ✅ 함수형 업데이트를 사용하여 항상 최신 상태를 참조
+      intervalRef.current = setInterval(() => {
+        setCurrentSeconds((prevSeconds) => prevSeconds + 1);
+      }, 1000);
+    }
+
+    // 메모리 누수 방지를 위한 클린업
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [myStatus]);
+
+  // 뽀모도로 타이머 로직
+  useEffect(() => {
+    if (pomodoroIntervalRef.current) {
+      clearInterval(pomodoroIntervalRef.current);
+      pomodoroIntervalRef.current = null;
+    }
+
+    if (pomodoroIsRunning && pomodoroTime > 0) {
+      pomodoroIntervalRef.current = setInterval(() => {
+        setPomodoroTime((prev) => {
+          if (prev <= 1) {
+            // 시간 종료 - 다음 사이클로 전환
+            setPomodoroIsRunning(false);
+            
+            if (pomodoroMode === "work") {
+              // 작업 완료
+              toast({
+                title: "🎉 작업 완료!",
+                description: "휴식을 취하세요!",
+              });
+              
+              // 4번째 사이클이면 긴 휴식, 아니면 짧은 휴식
+              if (pomodoroCycle === 4) {
+                setPomodoroMode("longBreak");
+                setPomodoroTime(15 * 60);
+                setPomodoroCycle(1);
+              } else {
+                setPomodoroMode("shortBreak");
+                setPomodoroTime(5 * 60);
+                setPomodoroCycle((prev) => prev + 1);
+              }
+            } else {
+              // 휴식 완료
+              toast({
+                title: "휴식 완료",
+                description: "다시 공부를 시작하세요!",
+              });
+              setPomodoroMode("work");
+              setPomodoroTime(25 * 60);
+            }
+            return 0;
           }
-        } else if (error?.message) {
-          errorMessage = error.message;
-        }
-        
+          return prev - 1;
+        });
+      }, 1000);
+    }
+
+    return () => {
+      if (pomodoroIntervalRef.current) {
+        clearInterval(pomodoroIntervalRef.current);
+        pomodoroIntervalRef.current = null;
+      }
+    };
+  }, [pomodoroIsRunning, pomodoroTime, pomodoroMode, pomodoroCycle]);
+
+  // ✅ 타이머 상태 폴링 (1초마다) - 기존 timerAPI용 (필요시 유지)
+  useEffect(() => {
+    if (!user || !roomId || !hasJoinedRef.current) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const status = await timerAPI.getTimerStatus();
+        setTimerStatus(status);
+      } catch (error) {
+        console.error("타이머 상태 조회 실패:", error);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [user, roomId]);
+
+  // ✅ 방 입장 처리 (타이머 시작 포함)
+  useEffect(() => {
+    if (!user || !roomId || hasJoinedRef.current) return;
+
+    // 타임아웃 설정 (30초 후 자동으로 로딩 해제)
+    const timeoutId = setTimeout(() => {
+      if (loading) {
+        console.error("입장 타임아웃 - 로딩 상태 강제 해제");
+        setLoading(false);
         toast({
-          title: "업로드 실패",
-          description: errorMessage,
+          title: "입장 시간 초과",
+          description:
+            "방 입장에 시간이 너무 오래 걸립니다. 다시 시도해주세요.",
           variant: "destructive",
         });
       }
-    }
-  };
+    }, 30000);
 
-  // 답변 제출
-  const handleSubmitAnswer = (questionId: string) => {
-    const answerText = answerInputs[questionId];
-    if (!answerText?.trim() || !roomId) return;
+    const joinRoom = async () => {
+      try {
+        setLoading(true);
+        console.log("=== 방 입장 시작 ===");
+        console.log("roomId:", roomId);
+        console.log("user:", user);
 
-    webSocketService.sendMessage({
-      type: "ANSWER",
-      roomType: "GROUP",
-      roomId: Number(roomId),
-      message: answerText,
-      refId: Number(questionId),
-    });
+        // 1. 방 정보 로드
+        let roomData: GroupStudyRoom;
+        try {
+          roomData = await studyRoomAPI.getRoom(roomId);
+          console.log("Room data loaded:", roomData);
+          setRoomInfo(roomData);
+        } catch (error: any) {
+          console.error("Failed to get room info:", error);
+          clearTimeout(timeoutId);
+          setLoading(false);
+          setError(error?.message || "방 정보를 불러올 수 없습니다.");
+          toast({
+            title: "오류",
+            description: error?.message || "방 정보를 불러올 수 없습니다.",
+            variant: "destructive",
+          });
+          // 에러 발생 시 3초 후 자동으로 그룹 스터디 페이지로 이동
+          setTimeout(() => {
+            navigate("/group-study");
+          }, 3000);
+          return;
+        }
 
-    setAnswerInputs((prev) => ({ ...prev, [questionId]: "" }));
-    toast({ title: "답변 등록", description: "답변이 등록되었습니다!" });
-  };
+        // 2. 방 참여 (JWT 자동) - 500 에러는 무시하고 계속 진행
+        // 방 정보가 성공적으로 로드되었으므로, join 실패해도 계속 진행
+        try {
+          await studyRoomAPI.joinRoom(roomId);
+          console.log("Successfully joined room via API");
+        } catch (joinError: any) {
+          // 500 에러는 이미 참여 중이거나 중복 참여일 수 있으므로 무시하고 계속 진행
+          const errorMessage = String(joinError?.message || "");
+          const errorStatus = joinError?.status;
 
-  // 답변 채택
-  const handleAcceptAnswer = async (questionId: string, answerId: string) => {
-    try {
-      console.log("👑 Accepting answer:", { questionId, answerId });
+          console.log("방 참여 요청 결과 (계속 진행):", {
+            message: errorMessage,
+            status: errorStatus,
+            error: joinError,
+          });
 
-      const { chatAPI } = await import("@/lib/api");
-      await chatAPI.solveQuestion(Number(questionId), Number(answerId));
+          // 모든 에러에 대해 계속 진행 (이미 참여 중일 수 있음)
+          // 방 정보가 성공적으로 로드되었으므로 입장 가능
+        }
 
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === questionId && msg.type === "question"
-            ? {
-                ...msg,
-                answers: msg.answers?.map((ans) =>
-                  ans.id === answerId ? { ...ans, isAccepted: true } : ans
-                ),
-                status: "resolved" as const,
-              }
-            : msg
-        )
-      );
+        hasJoinedRef.current = true;
 
-      toast({
-        title: "답변 채택 완료",
-        description: "답변이 채택되어 질문이 해결되었습니다! 🎉",
-      });
-    } catch (error: any) {
-      console.error("Failed to accept answer:", error);
-      toast({
-        title: "채택 실패",
-        description: error?.message || "답변 채택에 실패했습니다.",
-        variant: "destructive",
-      });
-    }
-  };
+        // 3. ✅ 스터디 세션 시작 연동
+        try {
+          const roomIdNum = parseInt(roomId, 10);
+          if (!isNaN(roomIdNum)) {
+            console.log("Calling sessionAPI.startSession with:", { studyType: 'GROUP_STUDY', roomId: roomIdNum });
+            const sessionResponse = await sessionAPI.startSession({
+              studyType: 'GROUP_STUDY',
+              roomId: roomIdNum
+            });
+            console.log("Session API response:", sessionResponse);
+            
+            setSessionId(sessionResponse.sessionId);
+            setIsSessionActive(true);
+            setCurrentSeconds(0);
+            console.log("Session state updated:", {
+              sessionId: sessionResponse.sessionId,
+              isSessionActive: true
+            });
+          } else {
+            console.error("Invalid roomId:", roomId);
+          }
+        } catch (sessionError: any) {
+          console.error("Failed to start session:", sessionError);
+          console.error("Session error details:", {
+            message: sessionError?.message,
+            stack: sessionError?.stack
+          });
+          // 세션 시작 실패해도 방 입장은 계속 진행
+        }
 
-  // 질문으로 스크롤
-  const scrollToQuestion = (questionId: string) => {
-    setQuestionListOpen(false);
+        // 4. ✅ 기존 타이머 시작 (에러가 나도 계속 진행) - 필요시 유지
+        try {
+          const isCreator = roomData.creatorId === Number(user.id);
+          const timerResponse = await timerAPI.startTimer(
+            Number(roomId),
+            isCreator
+          );
+          setTimerStatus(timerResponse);
+          console.log("Timer started:", timerResponse);
+        } catch (timerError: any) {
+          console.error("타이머 시작 실패:", timerError);
+          // 타이머 실패해도 계속 진행
+        }
 
-    setTimeout(() => {
-      const element = document.getElementById(`question-${questionId}`);
-      if (element) {
-        element.scrollIntoView({ behavior: "smooth", block: "center" });
-        element.classList.add("ring-4", "ring-red-300", "ring-opacity-50");
+        addSystemMessage(`${user.username}님이 입장했습니다.`);
+
+        clearTimeout(timeoutId);
+        console.log("=== 방 입장 완료 ===");
+        console.log("roomInfo:", roomData);
+        setLoading(false);
+
+        toast({
+          title: "입장 완료",
+          description: `${roomData.roomName}에 입장했습니다.`,
+        });
+      } catch (error: any) {
+        console.error("Failed to join room:", error);
+        clearTimeout(timeoutId);
+        setLoading(false);
+        setError(error?.message || "방 입장에 실패했습니다.");
+        toast({
+          title: "입장 실패",
+          description: error?.message || "방 입장에 실패했습니다.",
+          variant: "destructive",
+        });
+        // 에러 발생 시 3초 후 자동으로 그룹 스터디 페이지로 이동
         setTimeout(() => {
-          element.classList.remove("ring-4", "ring-red-300", "ring-opacity-50");
-        }, 2000);
+          navigate("/group-study");
+        }, 3000);
       }
-    }, 100);
-  };
+    };
 
-  // 질문 삭제
-  const handleDeleteQuestion = async (questionId: string) => {
+    joinRoom();
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, roomId, navigate]);
+
+  // 브라우저 이벤트 처리
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (roomId && hasJoinedRef.current && !isLeavingRef.current) {
+        isLeavingRef.current = true;
+
+        const baseURL =
+          import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
+
+        // ✅ 스터디 세션 종료
+        if (sessionId !== null) {
+          fetch(`${baseURL}/api/study-sessions/${sessionId}/end`, {
+            method: "POST",
+            credentials: "include",
+            keepalive: true,
+            headers: { "Content-Type": "application/json" },
+          }).catch((err) => console.error("Failed to end session:", err));
+        }
+
+        // ✅ 타이머 종료 (기존 timerAPI용)
+        fetch(`${baseURL}/api/timer/end`, {
+          method: "POST",
+          credentials: "include",
+          keepalive: true,
+          headers: { "Content-Type": "application/json" },
+        }).catch((err) => console.error("Failed to end timer:", err));
+
+        // 방 나가기
+        const url = `${baseURL}/api/study-rooms/${roomId}/leave`;
+        fetch(url, {
+          method: "POST",
+          credentials: "include",
+          keepalive: true,
+          headers: { "Content-Type": "application/json" },
+        }).catch((err) => console.error("Failed to leave room:", err));
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      if (roomId && hasJoinedRef.current && !isLeavingRef.current) {
+        leaveRoom();
+      }
+    };
+  }, [roomId]);
+
+  // ✅ 방 나가기 (타이머 종료 포함)
+  const leaveRoom = async () => {
+    if (!roomId || isLeavingRef.current) return;
+    isLeavingRef.current = true;
+
     try {
-      console.log("🗑️ Deleting question:", questionId);
-
-      const { chatAPI } = await import("@/lib/api");
-      await chatAPI.deleteMessage(Number(questionId));
-
-      setMessages((prev) => prev.filter((msg) => msg.id !== questionId));
-
-      toast({
-        title: "삭제 완료",
-        description: "질문이 삭제되었습니다.",
-      });
-    } catch (error: any) {
-      console.error("Failed to delete question:", error);
-      toast({
-        title: "삭제 실패",
-        description: error?.message || "질문 삭제에 실패했습니다.",
-        variant: "destructive",
-      });
-    }
-  };
-
-  // 방 나가기
-  const handleExitRoom = async () => {
-    if (!roomId || !roomInfo) return;
-
-    const isCreator = user && roomInfo.creatorId === Number(user.id);
-
-    if (isCreator) {
-      const confirmExit = confirm(
-        "방장이 나가면 다른 참여자에게 방장 권한이 이양되거나 방이 삭제됩니다.\n정말로 나가시겠습니까?"
-      );
-
-      if (!confirmExit) {
-        setExitDialogOpen(false);
-        return;
+      // ✅ 스터디 세션 종료 연동
+      if (sessionId !== null) {
+        try {
+          const endResult = await sessionAPI.endSession(sessionId);
+          console.log("Session ended successfully:", endResult);
+          
+          // 레벨업 확인 및 축하 메시지
+          if (endResult.leveledUp && endResult.newLevel !== null) {
+            toast({
+              title: "🎉 레벨업!",
+              description: `축하합니다! 레벨 ${endResult.newLevel}이 되었습니다!`,
+            });
+          }
+          
+          // setInterval 정리 및 currentSeconds 초기화
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+          }
+          setCurrentSeconds(0);
+          setSessionId(null);
+          setIsSessionActive(false);
+          
+          // 뽀모도로 타이머 정리
+          if (pomodoroIntervalRef.current) {
+            clearInterval(pomodoroIntervalRef.current);
+            pomodoroIntervalRef.current = null;
+          }
+          setPomodoroIsRunning(false);
+        } catch (sessionError: any) {
+          console.error("Failed to end session:", sessionError);
+          // 세션 종료 실패해도 방 나가기는 계속 진행
+        }
       }
+
+      // ✅ 기존 타이머 종료 (필요시 유지)
+      try {
+        await timerAPI.endTimer();
+        console.log("Timer ended successfully");
+      } catch (timerError) {
+        console.error("Failed to end timer:", timerError);
+      }
+
+      await studyRoomAPI.leaveRoom(roomId);
+      hasJoinedRef.current = false;
+    } catch (error) {
+      console.error("Failed to leave room:", error);
+      hasJoinedRef.current = false;
     }
-
-    await leaveRoom();
-    toast({
-      title: "방 나가기 완료",
-      description: "스터디룸에서 나왔습니다.",
-    });
-
-    setExitDialogOpen(false);
-    navigate("/group-study");
-  };
-
-  // 시간 포맷
-  const formatTime = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-
-    if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, "0")}:${secs
-        .toString()
-        .padStart(2, "0")}`;
-    }
-    return `${minutes.toString().padStart(2, "0")}:${secs
-      .toString()
-      .padStart(2, "0")}`;
-  };
-
-  // 상태 전환
-  const handleStatusToggle = (newStatus: "studying" | "resting") => {
-    if (myStatus === newStatus) return;
-
-    if (newStatus === "resting" && myStatus === "studying") {
-      addSystemMessage(
-        `${user?.username}님이 휴식 모드로 전환했습니다. (공부 시간: ${formatTime(
-          currentSeconds
-        )})`
-      );
-    } else if (newStatus === "studying" && myStatus === "resting") {
-      addSystemMessage(`${user?.username}님이 공부 모드로 전환했습니다.`);
-    }
-
-    setMyStatus(newStatus);
   };
 
   // 뽀모도로 타이머 핸들러
@@ -649,502 +630,238 @@ const GroupStudyRoomPage: React.FC = () => {
     }
   };
 
-  // 방 나가기 함수
-  const leaveRoom = async () => {
-    if (!roomId || isLeavingRef.current) return;
-    isLeavingRef.current = true;
+  // ✅ 상태 전환 (공부/휴식)
+  const handleStatusToggle = (newStatus: "studying" | "resting") => {
+    if (myStatus === newStatus) return;
 
-    try {
-      console.log("🚪 Leaving room...");
+    if (newStatus === "resting" && myStatus === "studying") {
+      addSystemMessage(
+        `${
+          user?.username
+        }님이 휴식 모드로 전환했습니다. (공부 시간: ${formatTime(
+          currentSeconds
+        )})`
+      );
+    } else if (newStatus === "studying" && myStatus === "resting") {
+      addSystemMessage(`${user?.username}님이 공부 모드로 전환했습니다.`);
+    }
 
-      // 1. WebSocket 구독 해제 및 연결 종료 (재연결 방지)
-      if (roomId) {
-        console.log("🔌 Unsubscribing and disconnecting WebSocket...");
-        webSocketService.unsubscribe(Number(roomId), "GROUP");
-        webSocketService.disconnect();
-      }
+    setMyStatus(newStatus);
+    setParticipants((prev) =>
+      prev.map((p) =>
+        p.username === user?.username
+          ? {
+              ...p,
+              timerStatus: newStatus === "studying" ? "STUDYING" : "RESTING",
+            }
+          : p
+      )
+    );
+  };
 
-      // 2. 스터디 세션 종료
-      if (sessionId !== null) {
-        try {
-          const endResult = await sessionAPI.endSession(sessionId);
-          console.log("Session ended successfully:", endResult);
+  const handleSendMessage = () => {
+    if (!messageInput.trim()) return;
 
-          if (endResult.leveledUp && endResult.newLevel !== null) {
-            toast({
-              title: "🎉 레벨업!",
-              description: `축하합니다! 레벨 ${endResult.newLevel}이 되었습니다!`,
-            });
-          }
+    if (isQuestionMode) {
+      // 질문 메시지 전송
+      const newMessage: ChatMessage = {
+        id: Date.now().toString(),
+        type: "question",
+        sender: user?.username || "익명",
+        content: messageInput,
+        imageUrl: questionImage || undefined,
+        fileName: questionFileName || undefined,
+        timestamp: new Date(),
+        answers: [],
+        status: "open",
+      };
 
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
-          setCurrentSeconds(0);
-          setSessionId(null);
-          setIsSessionActive(false);
+      setMessages((prev) => [...prev, newMessage]);
+      addSystemMessage(
+        `${user?.username}님이 질문했습니다: "${messageInput.slice(0, 30)}..."`
+      );
 
-          if (pomodoroIntervalRef.current) {
-            clearInterval(pomodoroIntervalRef.current);
-            pomodoroIntervalRef.current = null;
-          }
-          setPomodoroIsRunning(false);
-        } catch (sessionError: any) {
-          console.error("Failed to end session:", sessionError);
-        }
-      }
+      // 리셋
+      setMessageInput("");
+      setIsQuestionMode(false);
+      setQuestionImage(null);
+      setQuestionFileName(null);
 
-      // 3. 타이머 종료
-      try {
-        await timerAPI.endTimer();
-        console.log("Timer ended successfully");
-      } catch (timerError) {
-        console.error("Failed to end timer:", timerError);
-      }
+      toast({
+        title: "질문 등록",
+        description: "질문이 등록되었습니다. 다른 참여자들이 답변해줄 거예요!",
+      });
+    } else {
+      // 일반 텍스트 메시지 전송
+      const newMessage: ChatMessage = {
+        id: Date.now().toString(),
+        type: "text",
+        sender: user?.username || "익명",
+        content: messageInput,
+        timestamp: new Date(),
+      };
 
-      // 4. 방 나가기 API 호출
-      if (user?.id) {
-        try {
-          await studyRoomAPI.leaveRoom(roomId, Number(user.id));
-        } catch (leaveError: any) {
-          // 방장 퇴장 불가 에러 처리
-          if (leaveError?.message?.includes("방 생성자는")) {
-            toast({
-              title: "퇴장 불가",
-              description: "방 생성자는 방을 나갈 수 없습니다. 방 삭제 기능을 사용해주세요.",
-              variant: "destructive",
-            });
-            isLeavingRef.current = false;
-            return;
-          }
-          throw leaveError;
-        }
-      }
-      hasJoinedRef.current = false;
-      
-      console.log("✅ Successfully left the room");
-    } catch (error) {
-      console.error("Failed to leave room:", error);
-      hasJoinedRef.current = false;
+      setMessages((prev) => [...prev, newMessage]);
+      setMessageInput("");
     }
   };
 
-  // 방 삭제 기능 (방장 전용)
-  const deleteRoom = async () => {
-    if (!roomId || !user?.id) return;
+  const addSystemMessage = (content: string) => {
+    const newMessage: ChatMessage = {
+      id: Date.now().toString(),
+      type: "system",
+      content,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, newMessage]);
+  };
 
-    try {
-      console.log("🗑️ Deleting room...");
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-      // 1. WebSocket 구독 해제 및 연결 종료
-      if (roomId) {
-        webSocketService.unsubscribe(Number(roomId), "GROUP");
-        webSocketService.disconnect();
-      }
-
-      // 2. UI 정리
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-      if (pomodoroIntervalRef.current) {
-        clearInterval(pomodoroIntervalRef.current);
-        pomodoroIntervalRef.current = null;
-      }
-
-      // 3. 방 삭제 API 호출 (백엔드에서 세션/타이머 자동 종료)
-      await studyRoomAPI.deleteRoom(roomId, Number(user.id));
-      
-      hasJoinedRef.current = false;
-      
+    if (file.size > 10 * 1024 * 1024) {
       toast({
-        title: "방 삭제 완료",
-        description: "스터디 방이 삭제되었습니다.",
-      });
-
-      // 4. 그룹 스터디 메인으로 이동
-      navigate("/group-study");
-      
-      console.log("✅ Room deleted successfully");
-    } catch (error: any) {
-      console.error("Failed to delete room:", error);
-      
-      let errorMessage = "방 삭제에 실패했습니다.";
-      
-      if (error?.message?.includes("방 생성자만")) {
-        errorMessage = "방 생성자만 방을 삭제할 수 있습니다.";
-      } else if (error?.message?.includes("다른 멤버가")) {
-        errorMessage = "다른 멤버가 있을 때는 방을 삭제할 수 없습니다.";
-      } else if (error?.message) {
-        errorMessage = error.message;
-      }
-      
-      toast({
-        title: "삭제 실패",
-        description: errorMessage,
+        title: "오류",
+        description: "이미지 크기는 10MB를 초과할 수 없습니다.",
         variant: "destructive",
       });
+      return;
+    }
+
+    const imageUrl = URL.createObjectURL(file);
+
+    if (isQuestionMode) {
+      // 질문 모드일 때는 첨부파일로 저장
+      setQuestionImage(imageUrl);
+      setQuestionFileName(file.name);
     }
   };
 
-  // ==========================================
-  // useEffect들
-  // ==========================================
+  // 질문에 답변 추가
+  const handleSubmitAnswer = (questionId: string) => {
+    const answerText = answerInputs[questionId];
+    if (!answerText?.trim()) return;
 
-  // 채팅 스크롤
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  // 레벨 정보 조회
-  useEffect(() => {
-    const fetchLevelInfo = async () => {
-      try {
-        const info = await sessionAPI.getLevelInfo();
-        setLevelInfo(info);
-      } catch (error) {
-        console.error("Failed to fetch level info:", error);
-      }
+    const newAnswer: HelpAnswer = {
+      id: Date.now().toString(),
+      answerer: user?.username || "익명",
+      content: answerText,
+      timestamp: new Date(),
     };
 
-    if (user) {
-      fetchLevelInfo();
-    }
-  }, [user]);
-
-  // 타이머 실시간 업데이트
-  useEffect(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-
-    if (myStatus === "studying") {
-      intervalRef.current = setInterval(() => {
-        setCurrentSeconds((prevSeconds) => prevSeconds + 1);
-      }, 1000);
-    }
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [myStatus]);
-
-  // 뽀모도로 타이머
-  useEffect(() => {
-    if (pomodoroIntervalRef.current) {
-      clearInterval(pomodoroIntervalRef.current);
-      pomodoroIntervalRef.current = null;
-    }
-
-    if (pomodoroIsRunning && pomodoroTime > 0) {
-      pomodoroIntervalRef.current = setInterval(() => {
-        setPomodoroTime((prev) => {
-          if (prev <= 1) {
-            setPomodoroIsRunning(false);
-
-            if (pomodoroMode === "work") {
-              toast({
-                title: "🎉 작업 완료!",
-                description: "휴식을 취하세요!",
-              });
-
-              if (pomodoroCycle === 4) {
-                setPomodoroMode("longBreak");
-                setPomodoroTime(15 * 60);
-                setPomodoroCycle(1);
-              } else {
-                setPomodoroMode("shortBreak");
-                setPomodoroTime(5 * 60);
-                setPomodoroCycle((prev) => prev + 1);
-              }
-            } else {
-              toast({
-                title: "휴식 완료",
-                description: "다시 공부를 시작하세요!",
-              });
-              setPomodoroMode("work");
-              setPomodoroTime(25 * 60);
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === questionId && msg.type === "question"
+          ? {
+              ...msg,
+              answers: [...(msg.answers || []), newAnswer],
+              status: "helping" as const,
             }
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
+          : msg
+      )
+    );
 
-    return () => {
-      if (pomodoroIntervalRef.current) {
-        clearInterval(pomodoroIntervalRef.current);
-        pomodoroIntervalRef.current = null;
-      }
-    };
-  }, [pomodoroIsRunning, pomodoroTime, pomodoroMode, pomodoroCycle]);
+    // 답변 입력 초기화
+    setAnswerInputs((prev) => ({ ...prev, [questionId]: "" }));
 
-  // 타이머 상태 폴링
-  useEffect(() => {
-    if (!user || !roomId || !hasJoinedRef.current) return;
+    toast({
+      title: "답변 등록",
+      description: "답변이 등록되었습니다!",
+    });
+  };
 
-    const interval = setInterval(async () => {
-      try {
-        const status = await timerAPI.getTimerStatus();
-        setTimerStatus(status);
-      } catch (error) {
-        console.error("타이머 상태 조회 실패:", error);
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [user, roomId]);
-
-  // 방 입장 처리
-  useEffect(() => {
-    if (!user || !roomId || hasJoinedRef.current) return;
-
-    const timeoutId = setTimeout(() => {
-      if (loading) {
-        console.error("입장 타임아웃 - 로딩 상태 강제 해제");
-        setLoading(false);
-        toast({
-          title: "입장 시간 초과",
-          description: "방 입장에 시간이 너무 오래 걸립니다. 다시 시도해주세요.",
-          variant: "destructive",
-        });
-      }
-    }, 30000);
-
-    const joinRoom = async () => {
-      try {
-        setLoading(true);
-        console.log("=== 방 입장 시작 ===");
-
-        // 1. 방 정보 로드
-        let roomData: GroupStudyRoom;
-        try {
-          roomData = await studyRoomAPI.getRoom(roomId);
-          console.log("Room data loaded:", roomData);
-          setRoomInfo(roomData);
-
-          // 참여자 목록 로드
-          try {
-            const pList = await studyRoomAPI.getParticipants(roomId);
-            console.log("📋 Participants API response:", pList);
-            
-            // API 응답: [{ id, memberId, joinedAt }]
-            // memberId로 사용자 정보를 매핑해야 함
-            if (Array.isArray(pList) && pList.length > 0) {
-              // 일단 memberId만 표시 (나중에 사용자 정보 API 추가 가능)
-              const participantList = pList.map((p: any) => ({
-                memberId: p.memberId,
-                username: p.memberId === roomData.creatorId ? roomData.creatorUsername : `사용자${p.memberId}`,
-                profileImageUrl: undefined,
-                joinedAt: p.joinedAt,
-              }));
-              
-              console.log("✅ Mapped participants:", participantList);
-              setParticipants(participantList as any);
+  // 답변 채택
+  const handleAcceptAnswer = (questionId: string, answerId: string) => {
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === questionId && msg.type === "question"
+          ? {
+              ...msg,
+              answers: msg.answers?.map((ans) =>
+                ans.id === answerId ? { ...ans, isAccepted: true } : ans
+              ),
+              status: "resolved" as const,
             }
-          } catch (e) {
-            console.error("Failed to load participants:", e);
-            // 참여자 로드 실패해도 방 입장은 계속
-            setParticipants([]);
-          }
-        } catch (error: any) {
-          console.error("Failed to get room info:", error);
-          clearTimeout(timeoutId);
-          setLoading(false);
-          setError(error?.message || "방 정보를 불러올 수 없습니다.");
-          toast({
-            title: "오류",
-            description: error?.message || "방 정보를 불러올 수 없습니다.",
-            variant: "destructive",
-          });
-          setTimeout(() => {
-            navigate("/group-study");
-          }, 3000);
-          return;
-        }
+          : msg
+      )
+    );
 
-        // 2. 방 참여
-        try {
-          if (user?.id) {
-            await studyRoomAPI.joinRoom(roomId, Number(user.id));
-            console.log("Successfully joined room via API");
-          }
-        } catch (joinError: any) {
-          console.log("방 참여 요청 결과 (계속 진행):", joinError);
-        }
+    toast({
+      title: "답변 채택 완료",
+      description: "답변이 채택되어 질문이 해결되었습니다! 🎉",
+    });
+  };
 
-        // WebSocket 연결
-        webSocketService.connect(
-          () => {
-            console.log("✅ WebSocket connected");
-            const roomIdNum = Number(roomId);
-            
-            // 채팅 내역 불러오기
-            loadChatHistory(roomIdNum);
-            
-            // 구독 시작
-            webSocketService.subscribe(roomIdNum, "GROUP", handleWebSocketMessage);
-          },
-          (err) => {
-            console.error("❌ WebSocket error:", err);
-          }
-        );
+  // 질문으로 스크롤
+  const scrollToQuestion = (questionId: string) => {
+    setQuestionListOpen(false);
 
-        hasJoinedRef.current = true;
-
-        // 3. 스터디 세션 시작
-        try {
-          const roomIdNum = parseInt(roomId, 10);
-          if (!isNaN(roomIdNum)) {
-            const sessionResponse = await sessionAPI.startSession({
-              studyType: 'GROUP_STUDY',
-              roomId: roomIdNum
-            });
-
-            setSessionId(sessionResponse.sessionId);
-            setIsSessionActive(true);
-            setCurrentSeconds(0);
-          }
-        } catch (sessionError: any) {
-          console.error("Failed to start session:", sessionError);
-        }
-
-        // 4. 타이머 시작
-        try {
-          const isCreator = roomData.creatorId === Number(user.id);
-          const timerResponse = await timerAPI.startTimer(
-            Number(roomId),
-            isCreator
-          );
-          setTimerStatus(timerResponse);
-        } catch (timerError: any) {
-          console.error("타이머 시작 실패:", timerError);
-        }
-
-        clearTimeout(timeoutId);
-        setLoading(false);
-
-        toast({
-          title: "입장 완료",
-          description: `${roomData.roomName}에 입장했습니다.`,
-        });
-      } catch (error: any) {
-        console.error("Failed to join room:", error);
-        clearTimeout(timeoutId);
-        setLoading(false);
-        setError(error?.message || "방 입장에 실패했습니다.");
-        toast({
-          title: "입장 실패",
-          description: error?.message || "방 입장에 실패했습니다.",
-          variant: "destructive",
-        });
+    setTimeout(() => {
+      const element = document.getElementById(`question-${questionId}`);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+        element.classList.add("ring-4", "ring-red-300", "ring-opacity-50");
         setTimeout(() => {
-          navigate("/group-study");
-        }, 3000);
+          element.classList.remove("ring-4", "ring-red-300", "ring-opacity-50");
+        }, 2000);
       }
-    };
+    }, 100);
+  };
 
-    joinRoom();
+  // 질문 삭제
+  const handleDeleteQuestion = (questionId: string) => {
+    setMessages((prev) => prev.filter((msg) => msg.id !== questionId));
 
-    // ✅ cleanup 함수 개선
-    return () => {
-      clearTimeout(timeoutId);
-      
-      // 컴포넌트 언마운트 시에만 WebSocket 정리
-      // 방 나가기는 leaveRoom 함수에서 처리
-      console.log("🧹 Cleaning up room join effect");
-    };
-  }, [user, roomId, navigate]);
+    toast({
+      title: "삭제 완료",
+      description: "질문이 삭제되었습니다.",
+    });
+  };
 
-  // 브라우저 이벤트 처리
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (roomId && hasJoinedRef.current && !isLeavingRef.current) {
-        isLeavingRef.current = true;
+  const handleExitRoom = async () => {
+    if (!roomId || !roomInfo) return;
 
-        const baseURL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
+    const isCreator = user && roomInfo.creatorId === Number(user.id);
 
-        // WebSocket 정리
-        webSocketService.unsubscribe(Number(roomId), "GROUP");
-        webSocketService.disconnect();
+    if (isCreator) {
+      const confirmExit = confirm(
+        "방장이 나가면 다른 참여자에게 방장 권한이 이양되거나 방이 삭제됩니다.\n정말로 나가시겠습니까?"
+      );
 
-        if (sessionId !== null) {
-          fetch(`${baseURL}/api/study-sessions/${sessionId}/end`, {
-            method: "POST",
-            credentials: "include",
-            keepalive: true,
-            headers: { "Content-Type": "application/json" },
-          }).catch((err) => console.error("Failed to end session:", err));
-        }
-
-        fetch(`${baseURL}/api/timer/end`, {
-          method: "POST",
-          credentials: "include",
-          keepalive: true,
-          headers: { "Content-Type": "application/json" },
-        }).catch((err) => console.error("Failed to end timer:", err));
-
-        const url = `${baseURL}/api/study-rooms/${roomId}/leave`;
-        fetch(url, {
-          method: "POST",
-          credentials: "include",
-          keepalive: true,
-          headers: { "Content-Type": "application/json" },
-        }).catch((err) => console.error("Failed to leave room:", err));
+      if (!confirmExit) {
+        setExitDialogOpen(false);
+        return;
       }
-    };
+    }
 
-    window.addEventListener("beforeunload", handleBeforeUnload);
+    await leaveRoom();
+    toast({
+      title: "방 나가기 완료",
+      description: "스터디룸에서 나왔습니다.",
+    });
 
-    // ✅ cleanup 함수에서 leaveRoom 호출 제거
-    return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-    };
-  }, [roomId, sessionId]);
+    setExitDialogOpen(false);
+    navigate("/group-study");
+  };
 
-  // 참여자 새로고침
-  useEffect(() => {
-    if (!roomId || !hasJoinedRef.current || !roomInfo) return;
+  // 시간 포맷 함수
+  const formatTime = (seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
 
-    const refresh = async () => {
-      try {
-        const pList = await studyRoomAPI.getParticipants(roomId);
-        console.log("🔄 Refreshing participants:", pList);
-        
-        if (Array.isArray(pList) && pList.length > 0) {
-          const participantList = pList.map((p: any) => ({
-            memberId: p.memberId,
-            username: p.memberId === roomInfo.creatorId ? roomInfo.creatorUsername : `사용자${p.memberId}`,
-            profileImageUrl: undefined,
-            joinedAt: p.joinedAt,
-          }));
-          
-          setParticipants(participantList as any);
-        } else {
-          setParticipants([]);
-        }
-      } catch (e) {
-        console.error("Failed to refresh participants:", e);
-      }
-    };
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, "0")}:${secs
+        .toString()
+        .padStart(2, "0")}`;
+    }
+    return `${minutes.toString().padStart(2, "0")}:${secs
+      .toString()
+      .padStart(2, "0")}`;
+  };
 
-    // 즉시 한 번 실행
-    refresh();
-
-    const interval = setInterval(refresh, 10000);
-    return () => clearInterval(interval);
-  }, [roomId, roomInfo]);
-
-  // ==========================================
-  // JSX 렌더링
-  // ==========================================
-
+  // 로그인 확인
   if (!user) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-50">
@@ -1156,6 +873,7 @@ const GroupStudyRoomPage: React.FC = () => {
     );
   }
 
+  // roomId 확인
   if (!roomId) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-50">
@@ -1234,9 +952,9 @@ const GroupStudyRoomPage: React.FC = () => {
                 <div className="space-y-2 max-h-60 overflow-y-auto">
                   {participants.map((participant) => (
                     <div
-                      key={participant.memberId}
+                      key={participant.id}
                       className={`flex items-center space-x-3 p-2 rounded-lg ${
-                        participant.memberId === roomInfo.creatorId
+                        participant.isCreator
                           ? "bg-yellow-50 border border-yellow-200"
                           : participant.username === user?.username
                           ? "bg-indigo-50 border border-indigo-200"
@@ -1249,22 +967,22 @@ const GroupStudyRoomPage: React.FC = () => {
                         ) : null}
                         <AvatarFallback
                           className={
-                            participant.memberId === roomInfo.creatorId
+                            participant.isCreator
                               ? "bg-yellow-500 text-white"
-                              : participant.memberId === Number(user?.id)
+                              : participant.username === user?.username
                               ? "bg-indigo-500 text-white"
                               : "bg-gray-400 text-white"
                           }
                         >
-                          {participant.username?.charAt(0)?.toUpperCase() || "U"}
+                          {participant.username.charAt(0).toUpperCase()}
                         </AvatarFallback>
                       </Avatar>
                       <div className="flex-1">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium">
-                            {participant.username || `사용자${participant.memberId}`}
+                            {participant.username}
                           </span>
-                          {participant.memberId === roomInfo.creatorId && (
+                          {participant.isCreator && (
                             <Badge
                               variant="secondary"
                               className="text-xs bg-yellow-100"
@@ -1272,12 +990,26 @@ const GroupStudyRoomPage: React.FC = () => {
                               방장
                             </Badge>
                           )}
-                          {participant.memberId === Number(user?.id) &&
-                            participant.memberId !== roomInfo.creatorId && (
+                          {participant.username === user?.username &&
+                            !participant.isCreator && (
                               <Badge variant="secondary" className="text-xs">
                                 나
                               </Badge>
                             )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span
+                            className={`w-2 h-2 rounded-full ${
+                              participant.timerStatus === "STUDYING"
+                                ? "bg-green-500"
+                                : "bg-orange-500"
+                            }`}
+                          ></span>
+                          <span className="text-xs text-gray-500">
+                            {participant.timerStatus === "STUDYING"
+                              ? "공부중"
+                              : "휴식중"}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -1287,6 +1019,7 @@ const GroupStudyRoomPage: React.FC = () => {
             </PopoverContent>
           </Popover>
 
+          {/* 남은 시간 표시 */}
           {roomInfo.remainingMinutes && roomInfo.remainingMinutes > 0 && (
             <div className="flex items-center text-sm text-gray-600">
               <Clock className="w-4 h-4 mr-1" />
@@ -1304,39 +1037,6 @@ const GroupStudyRoomPage: React.FC = () => {
             <Users className="w-4 h-4 mr-2" />
             초대
           </Button>
-          
-          {/* 방장 전용: 방 삭제 버튼 */}
-          {roomInfo.creatorId === Number(user?.id) && participants.length === 1 && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-300"
-              onClick={async () => {
-                if (confirm("정말로 이 방을 삭제하시겠습니까?\n\n⚠️ 삭제 후에는 복구할 수 없으며, 세션 기록이 저장됩니다.")) {
-                  await deleteRoom();
-                }
-              }}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="mr-2"
-              >
-                <path d="M3 6h18" />
-                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-              </svg>
-              방 삭제
-            </Button>
-          )}
-          
           <Button
             variant="outline"
             size="sm"
@@ -1352,7 +1052,7 @@ const GroupStudyRoomPage: React.FC = () => {
       <div className="flex-1 flex overflow-hidden">
         {/* 왼쪽: 채팅 */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* 상태 전환 + 타이머 */}
+          {/* ✅ 상태 전환 + 타이머 */}
           <div className="border-b bg-white p-4">
             <div className="flex items-center gap-4">
               <Button
@@ -1422,13 +1122,16 @@ const GroupStudyRoomPage: React.FC = () => {
 
               {/* 뽀모도로 타이머 */}
               <div className="flex items-center gap-5 ml-4 px-5 py-3 bg-white rounded-xl border border-red-100 shadow-md hover:shadow-lg transition-all duration-200">
+                {/* 뽀모도로 라벨 */}
                 <div className="flex flex-col items-center">
                   <span className="text-base font-semibold text-red-600 whitespace-nowrap tracking-wide uppercase">Pomodoro</span>
                   <span className="text-xs text-gray-500 font-normal">뽀모도로</span>
                 </div>
                 
+                {/* 구분선 */}
                 <div className="h-8 w-px bg-gradient-to-b from-transparent via-red-200 to-transparent"></div>
                 
+                {/* 시간 표시 */}
                 <div className="flex items-center gap-2">
                   <span className={`text-2xl font-mono font-semibold tabular-nums ${
                     pomodoroIsRunning
@@ -1439,6 +1142,7 @@ const GroupStudyRoomPage: React.FC = () => {
                   </span>
                 </div>
                 
+                {/* 모드 및 사이클 */}
                 <div className="flex items-center gap-2">
                   <Badge 
                     variant="secondary" 
@@ -1457,8 +1161,10 @@ const GroupStudyRoomPage: React.FC = () => {
                   </Badge>
                 </div>
                 
+                {/* 구분선 */}
                 <div className="h-8 w-px bg-gradient-to-b from-transparent via-gray-200 to-transparent"></div>
                 
+                {/* 컨트롤 버튼 */}
                 <div className="flex items-center gap-1.5">
                   {pomodoroIsRunning ? (
                     <Button
@@ -1492,6 +1198,7 @@ const GroupStudyRoomPage: React.FC = () => {
                   </Button>
                 </div>
                 
+                {/* 모드 선택 */}
                 <Popover>
                   <PopoverTrigger asChild>
                     <Button
@@ -1549,7 +1256,9 @@ const GroupStudyRoomPage: React.FC = () => {
                 </Popover>
               </div>
 
+              {/* ✅ 총 학습 시간 + 레벨 + 질문 개수 */}
               <div className="ml-auto flex items-center gap-4 text-sm text-gray-600">
+                {/* 레벨 정보 표시 */}
                 {levelInfo && (
                   <div className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-indigo-50 to-sky-50 rounded-lg border border-indigo-200">
                     <span className="font-semibold text-indigo-700">
@@ -1560,6 +1269,7 @@ const GroupStudyRoomPage: React.FC = () => {
                     </span>
                   </div>
                 )}
+                {/* 질문 개수 표시 - 팝오버 */}
                 {messages.filter(
                   (m) => m.type === "question" && m.status !== "resolved"
                 ).length > 0 && (
@@ -1671,6 +1381,7 @@ const GroupStudyRoomPage: React.FC = () => {
                     {message.content}
                   </div>
                 ) : message.type === "question" ? (
+                  // 질문 메시지
                   <div
                     id={`question-${message.id}`}
                     className="bg-gradient-to-r from-red-50 to-orange-50 rounded-lg p-4 border-l-4 border-red-500 space-y-3 transition-all"
@@ -1724,6 +1435,7 @@ const GroupStudyRoomPage: React.FC = () => {
                       )}
                     </div>
 
+                    {/* 질문 내용 */}
                     <div className="bg-white rounded-lg p-3 shadow-sm">
                       <div className="flex items-start gap-2">
                         <HelpCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
@@ -1733,6 +1445,7 @@ const GroupStudyRoomPage: React.FC = () => {
                       </div>
                     </div>
 
+                    {/* 첨부 이미지 */}
                     {message.imageUrl && (
                       <div className="bg-white rounded-lg p-2">
                         <img
@@ -1744,6 +1457,7 @@ const GroupStudyRoomPage: React.FC = () => {
                       </div>
                     )}
 
+                    {/* 채택된 답변 (해결된 경우) */}
                     {message.status === "resolved" &&
                       message.answers &&
                       message.answers.some((ans) => ans.isAccepted) && (
@@ -1786,6 +1500,7 @@ const GroupStudyRoomPage: React.FC = () => {
                         </div>
                       )}
 
+                    {/* 답변 목록 (해결되지 않은 경우) */}
                     {message.status !== "resolved" &&
                       message.answers &&
                       message.answers.length > 0 && (
@@ -1813,6 +1528,7 @@ const GroupStudyRoomPage: React.FC = () => {
                                     {formatRelativeTime(answer.timestamp)}
                                   </span>
                                 </div>
+                                {/* 질문 작성자만 채택 버튼 표시 */}
                                 {message.sender === user?.username && (
                                   <Button
                                     variant="ghost"
@@ -1835,6 +1551,7 @@ const GroupStudyRoomPage: React.FC = () => {
                         </div>
                       )}
 
+                    {/* 답변 입력 (해결되지 않은 경우만) */}
                     {message.status !== "resolved" && (
                       <div className="pl-7 flex gap-2">
                         <Input
@@ -1862,6 +1579,7 @@ const GroupStudyRoomPage: React.FC = () => {
                     )}
                   </div>
                 ) : (
+                  // 일반 메시지
                   <div className="flex items-start space-x-3">
                     <Avatar className="w-8 h-8">
                       <AvatarFallback>
@@ -1893,6 +1611,7 @@ const GroupStudyRoomPage: React.FC = () => {
 
           {/* 채팅 입력 */}
           <div className="border-t bg-white p-4">
+            {/* 질문 모드 표시 */}
             {isQuestionMode && (
               <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
                 <div className="flex items-center gap-2">
