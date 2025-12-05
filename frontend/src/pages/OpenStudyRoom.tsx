@@ -1349,7 +1349,9 @@ useEffect(() => {
         <div className="flex items-center space-x-4">
           <h1 className="text-2xl font-bold text-gray-900">{roomInfo.title}</h1>
           <Badge variant="secondary">{roomInfo.studyField}</Badge>
+        </div>
 
+        <div className="flex items-center space-x-4">
           {/* 참여자 수 팝오버 */}
           <Popover>
             <PopoverTrigger asChild>
@@ -1431,9 +1433,7 @@ useEffect(() => {
               </div>
             </PopoverContent>
           </Popover>
-        </div>
 
-        <div className="flex items-center space-x-4">
           <Button
             variant="outline"
             size="sm"
