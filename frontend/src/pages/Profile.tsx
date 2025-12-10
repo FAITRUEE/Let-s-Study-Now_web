@@ -45,16 +45,19 @@ const Profile: React.FC = () => {
   const [deletePassword, setDeletePassword] = useState("");
 
   useEffect(() => {
-    if (user) {
-      setProfileData({
-        bio: user.bio || "",
-        studyField: user.studyFields?.[0] || user.studyField || "",
-      });
-      if (user.profileImageUrl) {
-        setImagePreview(user.profileImageUrl);
-      }
+  if (user) {
+    setProfileData({
+      bio: user.bio || "",
+      studyField: user.studyFields?.[0] || user.studyField || "",
+    });
+    
+    // ✅ 프로필 이미지 URL 업데이트
+    if (user.profileImageUrl) {
+      console.log("프로필 이미지 URL 업데이트:", user.profileImageUrl);
+      setImagePreview(user.profileImageUrl);
     }
-  }, [user]);
+  }
+}, [user]); // user 객체가 변경될 때마다 실행
 
   // ✅ 레벨 계산 (경험치 기반)
   const calculateLevel = (exp: number = 0) => {
@@ -103,10 +106,8 @@ const handleProfileUpdate = async () => {
   setLoading(true);
 
   try {
-    // ✅ FormData 생성
     const formData = new FormData();
 
-    // ✅ 전송할 JSON 데이터 객체
     const dataObj: any = {
       studyField: profileData.studyField,
     };
@@ -115,13 +116,11 @@ const handleProfileUpdate = async () => {
       dataObj.bio = profileData.bio;
     }
 
-    // ✅ 핵심 수정 부분: JSON을 application/json Blob으로 감싸서 전송
     formData.append(
       "data",
       new Blob([JSON.stringify(dataObj)], { type: "application/json" })
     );
 
-    // ✅ image 파일이 있으면 추가 (선택 사항)
     if (profileImage) {
       formData.append("image", profileImage);
     }
@@ -130,13 +129,12 @@ const handleProfileUpdate = async () => {
     console.log("data:", dataObj);
     console.log("image:", profileImage?.name || "없음");
 
-    // ✅ FormData 내부 확인 (디버깅용)
     for (let pair of formData.entries()) {
       console.log(pair[0], pair[1]);
     }
 
-    // ✅ PATCH 요청
-    await authAPI.updateProfile(formData);
+    // ✅ API 응답을 받아서 처리
+    const response = await authAPI.updateProfile(formData);
 
     toast({
       title: "성공",
@@ -145,6 +143,12 @@ const handleProfileUpdate = async () => {
 
     // ✅ 사용자 정보 새로고침
     await refreshUser();
+    
+    // ✅ 새로고침된 사용자 정보에서 이미지 URL 업데이트
+    // refreshUser가 완료된 후 user 객체가 업데이트되므로
+    // useEffect가 자동으로 실행되어 imagePreview가 업데이트됩니다.
+    
+    // ✅ 임시 파일 상태 초기화
     setProfileImage(null);
 
   } catch (error: any) {
