@@ -107,54 +107,56 @@ const Register: React.FC = () => {
 
     setLoading(true);
 
+    const payload: any = {
+      email: formData.email,
+      username: formData.username,
+      password: formData.password,
+      checkPassword: formData.confirmPassword,
+      studyField: formData.studyFields[0],
+      checkPw: true,
+    };
+
+    if (formData.bio) {
+      payload.bio = formData.bio;
+    }
+
+    if (profileImage) {
+      payload.profileImageFile = profileImage;
+    }
+
+    console.log("📤 보낼 데이터:", payload);
+
     try {
-      // ✅ FormData로 전송 (프로필 이미지 포함)
-      const formDataToSend = new FormData();
-      formDataToSend.append("email", formData.email.trim());
-      formDataToSend.append("username", formData.username.trim());
-      formDataToSend.append("password", formData.password);
-      formDataToSend.append("checkPassword", formData.confirmPassword);
-      formDataToSend.append("studyField", formData.studyFields[0]);
-      formDataToSend.append("checkPw", "true");
+      const success = await register(payload);
+      setLoading(false);
 
-      if (formData.bio.trim()) {
-        formDataToSend.append("bio", formData.bio.trim());
-      }
-
-      // ✅ 프로필 이미지 추가
-      if (profileImage) {
-        formDataToSend.append("profileImageFile", profileImage);
-      }
-
-      console.log("📤 회원가입 데이터 전송 (FormData)");
-      console.log("- Email:", formData.email);
-      console.log("- Username:", formData.username);
-      console.log("- StudyField:", formData.studyFields[0]);
-      console.log("- ProfileImage:", profileImage ? profileImage.name : "없음");
-
-      const success = await register(formDataToSend);
-      
       if (success) {
-        setLoading(false);
-        alert("회원가입이 완료되었습니다!");
         navigate("/login");
-      } else {
-        setLoading(false);
       }
     } catch (error: any) {
       setLoading(false);
 
-      console.error("=== 회원가입 에러 ===");
-      console.error(error);
+      console.error("=== 회원가입 에러 상세 ===");
+      console.error("전체 에러 객체:", error);
+      console.error("에러 메시지:", error?.message);
+      console.error("에러 타입:", typeof error);
 
+      // ✅ 백엔드 에러 메시지를 그대로 표시
       let errorMessage = "회원가입에 실패했습니다.";
 
       if (error?.message) {
+        // 백엔드에서 보낸 메시지를 그대로 사용
         errorMessage = error.message;
+
+        // HTTP 상태 코드만 제거
         errorMessage = errorMessage
           .replace(/HTTP error! status: \d+\s*/g, "")
           .trim();
       }
+
+      // 최종 에러 메시지 표시
+      console.error("=== 사용자에게 표시할 메시지 ===");
+      console.error(errorMessage);
 
       alert(`회원가입 실패\n\n${errorMessage}`);
     }
@@ -227,11 +229,6 @@ const Register: React.FC = () => {
                   <p className="text-xs text-gray-500 mt-2">
                     JPG, PNG (최대 5MB)
                   </p>
-                  {profileImage && (
-                    <p className="text-xs text-green-600 mt-1 font-medium">
-                      ✓ {profileImage.name} ({(profileImage.size / 1024).toFixed(1)}KB)
-                    </p>
-                  )}
                 </div>
               </div>
 
